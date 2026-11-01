@@ -30,6 +30,7 @@ int gguf_type_block(uint32_t t, int *be, int *bb) {
         case GGML_F16:  *be=1;  *bb=2;   return 0;
         case GGML_Q8_0: *be=32; *bb=34;  return 0;  /* fp16 scale + 32 int8 */
         case GGML_Q4_0: *be=32; *bb=18;  return 0;  /* fp16 scale + 16 bytes */
+        case GGML_Q5_0: *be=32; *bb=22;  return 0;  /* fp16 scale + 4 qh + 16 qs */
         case GGML_Q4_K: *be=256;*bb=144; return 0;
         case GGML_Q6_K: *be=256;*bb=210; return 0;
         default: return -1;
@@ -182,6 +183,12 @@ void gguf_dump(const gguf_ctx *g) {
         else printf("%llu", (unsigned long long)k->val.u);
         printf("\n");
     }
+    { int cnt[16]={0}; for(uint64_t i=0;i<g->n_tensors;i++){uint32_t t=g->tensors[i].ggml_type; if(t<16)cnt[t]++;}
+      const char*names[16]={"F32","F16","Q4_0","Q4_1","?","?","Q5_0","Q5_1","Q8_0","Q8_1","Q2_K","Q3_K","Q4_K","Q5_K","Q6_K","Q8_K"};
+      printf("-- type histogram --\n"); for(int t=0;t<16;t++) if(cnt[t]) printf("  %-5s %d\n",names[t],cnt[t]); }
+    { const char*keys[]={"token_embd.weight","output.weight","blk.0.attn_q.weight","blk.0.ffn_gate.weight","blk.0.ffn_down.weight","blk.0.attn_v.weight"};
+      const char*tn2[16]={"F32","F16","Q4_0","Q4_1","?","?","Q5_0","Q5_1","Q8_0","Q8_1","Q2_K","Q3_K","Q4_K","Q5_K","Q6_K","Q8_K"};
+      printf("-- key tensors --\n"); for(int kk=0;kk<6;kk++){const gguf_tensor*t=gguf_tensor_by_name(g,keys[kk]); if(t)printf("  %-28s %s\n",keys[kk],t->ggml_type<16?tn2[t->ggml_type]:"?");} }
     printf("-- tensors (first 12) --\n");
     const char *tn[16] = {"F32","F16","Q4_0","Q4_1","?","?","Q5_0","Q5_1","Q8_0","Q8_1","Q2_K","Q3_K","Q4_K","Q5_K","Q6_K","Q8_K"};
     for (uint64_t i = 0; i < g->n_tensors && i < 12; i++) {

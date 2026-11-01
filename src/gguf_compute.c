@@ -37,6 +37,71 @@ float gguf_f16_to_f32(uint16_t h) {
 
 typedef struct { uint16_t d; int8_t qs[32]; } block_q8_0;
 
+/* ---- K-quants (super-block = 256 elements) ---- */
+typedef struct { uint16_t d; uint16_t dmin; uint8_t scales[12]; uint8_t qs[128]; } block_q4_K; /* 144 B */
+typedef struct { uint8_t ql[128]; uint8_t qh[64]; int8_t scales[16]; uint16_t d; } block_q6_K;  /* 210 B */
+
+/* unpack a 6-bit scale and 6-bit min for sub-block j from the packed 12 bytes */
+static inline void q4k_scale_min(int j, const uint8_t *q, uint8_t *d, uint8_t *m) {
+    if (j < 4) { *d = q[j] & 63; *m = q[j + 4] & 63; }
+    else {
+        *d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        *m = (q[j + 4] >> 4)  | ((q[j - 0] >> 6) << 4);
+    }
+}
+static void dequant_row_q4_K(const block_q4_K *x, float *y, int k) {
+    int nb = k / 256;
+    for (int i = 0; i < nb; i++) {
+        const uint8_t *q = x[i].qs;
+        float d = gguf_f16_to_f32(x[i].d), mn = gguf_f16_to_f32(x[i].dmin);
+        int is = 0; uint8_t sc, m;
+        for (int j = 0; j < 256; j += 64) {
+            q4k_scale_min(is + 0, x[i].scales, &sc, &m); float d1 = d * sc, m1 = mn * m;
+            q4k_scale_min(is + 1, x[i].scales, &sc, &m); float d2 = d * sc, m2 = mn * m;
+            for (int l = 0; l < 32; l++) *y++ = d1 * (q[l] & 0xF) - m1;
+            for (int l = 0; l < 32; l++) *y++ = d2 * (q[l] >> 4)  - m2;
+            q += 32; is += 2;
+        }
+    }
+}
+typedef struct { uint16_t d; uint8_t qh[4]; uint8_t qs[16]; } block_q5_0; /* 22 B, 32 elems */
+static void dequant_row_q5_0(const block_q5_0 *x, float *y, int k) {
+    int nb = k / 32;
+    for (int i = 0; i < nb; i++) {
+        float d = gguf_f16_to_f32(x[i].d);
+        uint32_t qh; memcpy(&qh, x[i].qh, 4);
+        for (int j = 0; j < 16; j++) {
+            uint8_t xh0 = ((qh >> (j +  0)) << 4) & 0x10;
+            uint8_t xh1 = ((qh >> (j + 12))     ) & 0x10;
+            int x0 = ((x[i].qs[j] & 0x0F) | xh0) - 16;
+            int x1 = ((x[i].qs[j] >>   4) | xh1) - 16;
+            y[i*32 + j]      = x0 * d;
+            y[i*32 + j + 16] = x1 * d;
+        }
+    }
+}
+static void dequant_row_q6_K(const block_q6_K *x, float *y, int k) {
+    int nb = k / 256;
+    for (int i = 0; i < nb; i++) {
+        float d = gguf_f16_to_f32(x[i].d);
+        const uint8_t *ql = x[i].ql; const uint8_t *qh = x[i].qh; const int8_t *sc = x[i].scales;
+        for (int n = 0; n < 256; n += 128) {
+            for (int l = 0; l < 32; l++) {
+                int is = l / 16;
+                int8_t q1 = (int8_t)((ql[l]      & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
+                int8_t q2 = (int8_t)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
+                int8_t q3 = (int8_t)((ql[l]      >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+                int8_t q4 = (int8_t)((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+                y[l]      = d * sc[is + 0] * q1;
+                y[l + 32] = d * sc[is + 2] * q2;
+                y[l + 64] = d * sc[is + 4] * q3;
+                y[l + 96] = d * sc[is + 6] * q4;
+            }
+            y += 128; ql += 64; qh += 32; sc += 8;
+        }
+    }
+}
+
 void gguf_dequant_row(uint32_t type, const void *src, float *dst, int n) {
     if (type == GGML_F32) { memcpy(dst, src, (size_t)n * 4); return; }
     if (type == GGML_F16) {
@@ -51,7 +116,11 @@ void gguf_dequant_row(uint32_t type, const void *src, float *dst, int n) {
             float d = gguf_f16_to_f32(b[j].d);
             for (int i = 0; i < 32; i++) dst[j * 32 + i] = b[j].qs[i] * d;
         }
+        return;
     }
+    if (type == GGML_Q5_0) { dequant_row_q5_0((const block_q5_0 *)src, dst, n); return; }
+    if (type == GGML_Q4_K) { dequant_row_q4_K((const block_q4_K *)src, dst, n); return; }
+    if (type == GGML_Q6_K) { dequant_row_q6_K((const block_q6_K *)src, dst, n); return; }
 }
 
 #if defined(__AVX2__)
@@ -76,6 +145,14 @@ static inline float dot_block_q8_0(const int8_t *qs, const float *x) {
         acc = _mm256_fmadd_ps(qf, xf, acc);
     }
     return hsum256(acc);
+}
+static inline float dot_f32(const float *a, const float *b, int n) {
+    __m256 acc = _mm256_setzero_ps();
+    int i = 0;
+    for (; i + 8 <= n; i += 8) acc = _mm256_fmadd_ps(_mm256_loadu_ps(a+i), _mm256_loadu_ps(b+i), acc);
+    float s = hsum256(acc);
+    for (; i < n; i++) s += a[i] * b[i];
+    return s;
 }
 #endif
 
@@ -102,6 +179,25 @@ void gguf_matmul(float *y, const float *x, const gguf_tensor *w, int n, int d) {
             y[o] = acc;
         }
         return;
+    }
+    {
+        int be, bb;
+        if (type != GGML_Q8_0 && type != GGML_F32 && type != GGML_F16 &&
+            gguf_type_block(type, &be, &bb) == 0) {
+        size_t row_bytes = (size_t)(n / be) * bb;
+        const uint8_t *data = (const uint8_t *)w->data;
+        #pragma omp parallel for schedule(static) if((long)n*(long)d > (1L<<20))
+        for (int o = 0; o < d; o++) {
+            float tmp[8192];
+            gguf_dequant_row(type, data + (size_t)o * row_bytes, tmp, n);
+#if defined(__AVX2__)
+            y[o] = dot_f32(tmp, x, n);
+#else
+            float a = 0; for (int i = 0; i < n; i++) a += tmp[i] * x[i]; y[o] = a;
+#endif
+        }
+        return;
+        }
     }
     if (type == GGML_F32) {
         const float *W = (const float *)w->data;

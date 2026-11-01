@@ -63,7 +63,8 @@ KV cache spills to disk; `topk` / `recent` trade exactness for less I/O.
 
 ### Run a real model from Hugging Face (GGUF)
 
-vireo also loads real GGUF models (Qwen2 family, Q8_0) with weights mmap'd from
+vireo also loads real GGUF models (Qwen2 family; Q8_0, Q5_0, Q4_K, Q6_K — so
+Q4_K_M files work) with weights mmap'd from
 disk and the KV cache streamed through its pager — CPU-only, no GPU:
 
 ```bash
