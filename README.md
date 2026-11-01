@@ -79,8 +79,12 @@ The capital of France is Paris. It is the largest city in Europe ...
 
 Under a RAM budget that forces eviction (`VIREO_CAP_BLOCKS`), the `all` strategy
 is **byte-identical** to the unbounded run while the KV cache spills to and pages
-from disk — verified on the real model. Throughput is modest (scalar CPU; SIMD
-and threading are open issues).
+from disk — verified on the real model.
+
+The Q8_0 matmul uses AVX2 (int8×float dot) and OpenMP across output rows:
+**~37 tok/s** on a 6-core laptop CPU for the 0.5B model (up from ~5 tok/s
+scalar). It is memory-bandwidth bound — the LM head streams ~138 MB of weights
+per token — so a few threads saturate it; tune with `OMP_NUM_THREADS`.
 
 ## Benchmark — resident RAM vs. context length
 

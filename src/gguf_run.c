@@ -12,6 +12,11 @@
 #include "gguf_compute.h"
 #include "kvstore.h"
 #include "select/select.h"
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+static double wall(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return t.tv_sec+t.tv_nsec*1e-9;}
 
 /* ----------------------------- byte <-> unicode (GPT-2) ------------------ */
 static int BYTE2CP[256];
@@ -201,6 +206,9 @@ int main(int argc,char**argv){
         else if(argv[i][0]!='-')path=argv[i];
     }
     if(!path){fprintf(stderr,"usage: %s model.gguf [-p prompt] [-n steps]\n",argv[0]);return 2;}
+#ifdef _OPENMP
+    if (!getenv("OMP_NUM_THREADS")) { int nc = omp_get_num_procs(); omp_set_num_threads(nc < 4 ? nc : 4); }
+#endif
     build_byte_maps();
     gguf_ctx*g=gguf_open(path); if(!g)return 1;
     Model m={0}; m.g=g;
@@ -257,7 +265,7 @@ int main(int argc,char**argv){
             path,m.n_layers,m.n_heads,m.n_kv_heads,m.head_size,m.vocab,np,strat->name,capb);
 
     printf("%s",prompt); fflush(stdout);
-    double t0=(double)clock()/CLOCKS_PER_SEC;
+    double t0=wall();
     int pos=0, tok=ids[0];
     for(int step=0; step<steps; step++){
         float*lg=forward(&m,tok,pos); pos++;
@@ -273,7 +281,7 @@ int main(int argc,char**argv){
         }
         tok=next;
     }
-    double dt=(double)clock()/CLOCKS_PER_SEC-t0;
+    double dt=wall()-t0;
     printf("\n");
     KVStats st; kv_stats(m.kv,&st);
     fprintf(stderr,"[vireo-gguf] %d steps in %.1fs (%.1f tok/s) | KV hits=%.0f%% read=%.0fMB spilled=%.0fMB resident=%.1fMB\n",

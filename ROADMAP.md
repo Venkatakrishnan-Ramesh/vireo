@@ -29,11 +29,12 @@ oracle green.
   SwiGLU, byte-level BPE tokenizer), KV streamed through the pager.
 - `make gguf-demo` runs Qwen2.5-0.5B-Instruct Q8_0 CPU-only; under a RAM budget
   that forces eviction, `all` is byte-identical to the unbounded run.
-- Open next: more quant types (Q4_K, Q6_K), SIMD/threaded matmul, more arches.
+- Q8_0 matmul is AVX2 + OpenMP (~37 tok/s for 0.5B, memory-bandwidth bound).
+- Open next: more quant types (Q4_K, Q6_K), more architectures, NEON for ARM.
 
 ## M4 — scale and product (open)
 - Async prefetch of next-token blocks.
-- AVX2/NEON dot products and dequant.
+- AVX2 Q8_0 matmul done; NEON (ARM) and AVX2 for the KV attention dot still open.
 - Block compression on spill (Zstd).
 - OpenAI-compatible serving endpoint.
 - The demo: 1,000,000-token context on 8 GB RAM, with the GIF.

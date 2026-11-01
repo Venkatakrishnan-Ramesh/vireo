@@ -1,5 +1,5 @@
 CC      ?= cc
-CFLAGS  ?= -O2 -std=c11 -Wall -Wextra -Isrc
+CFLAGS  ?= -O3 -march=native -funroll-loops -fopenmp -std=c11 -Wall -Wextra -Isrc
 LDLIBS  ?= -lm
 
 CORE := src/kvstore_dense.c src/kvstore_ooc.c \
