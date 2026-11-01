@@ -5,3 +5,4 @@ vireo-baseline
 *.bin.tmp
 baseline/*.bin
 !baseline/tokenizer.bin
+models/

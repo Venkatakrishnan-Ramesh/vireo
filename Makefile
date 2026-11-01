@@ -37,3 +37,6 @@ m1-test: vireo-baseline vireo-run
 .PHONY: demo
 demo: vireo
 	python3 scripts/make_demo.py
+
+gguf-dump: tools/gguf_dump.c src/gguf.c
+	$(CC) $(CFLAGS) $^ $(LDLIBS) -o gguf-dump
