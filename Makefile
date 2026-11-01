@@ -49,3 +49,6 @@ vireo-gguf: src/gguf_run.c $(GGUF_SRC) $(CORE)
 .PHONY: gguf-demo
 gguf-demo: vireo-gguf
 	./scripts/gguf_demo.sh
+
+expert-test: tests/test_expert_store.c src/expert_store.c
+	$(CC) $(CFLAGS) $^ $(LDLIBS) -o build_expert_test && ./build_expert_test
