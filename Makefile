@@ -40,3 +40,12 @@ demo: vireo
 
 gguf-dump: tools/gguf_dump.c src/gguf.c
 	$(CC) $(CFLAGS) $^ $(LDLIBS) -o gguf-dump
+
+# vireo-gguf: run a real GGUF model with KV streamed through vireo
+GGUF_SRC := src/gguf.c src/gguf_compute.c
+vireo-gguf: src/gguf_run.c $(GGUF_SRC) $(CORE)
+	$(CC) $(CFLAGS) $^ $(LDLIBS) -o vireo-gguf
+
+.PHONY: gguf-demo
+gguf-demo: vireo-gguf
+	./scripts/gguf_demo.sh

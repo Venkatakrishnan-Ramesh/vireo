@@ -61,6 +61,27 @@ VIREO_STORE=ooc VIREO_STRATEGY=all VIREO_CAP_BLOCKS=140 VIREO_STATS=1 \
 With `VIREO_STRATEGY=all` the output is identical to stock llama2.c while the
 KV cache spills to disk; `topk` / `recent` trade exactness for less I/O.
 
+### Run a real model from Hugging Face (GGUF)
+
+vireo also loads real GGUF models (Qwen2 family, Q8_0) with weights mmap'd from
+disk and the KV cache streamed through its pager — CPU-only, no GPU:
+
+```bash
+make gguf-demo   # downloads Qwen2.5-0.5B-Instruct (Q8_0, ~645 MB) and runs it
+                 # with the KV cache streamed from disk under a RAM budget
+```
+
+```
+$ ./vireo-gguf models/qwen2.5-0.5b-instruct-q8_0.gguf -p "The capital of France is" -n 40
+The capital of France is Paris. It is the largest city in Europe ...
+[vireo-gguf] 24 layers, 14/2 heads | KV hits=100% resident=1.5MB
+```
+
+Under a RAM budget that forces eviction (`VIREO_CAP_BLOCKS`), the `all` strategy
+is **byte-identical** to the unbounded run while the KV cache spills to and pages
+from disk — verified on the real model. Throughput is modest (scalar CPU; SIMD
+and threading are open issues).
+
 ## Benchmark — resident RAM vs. context length
 
 Measured by `scripts/make_demo.py` (every point is a real `./vireo` run; kv_dim=128,

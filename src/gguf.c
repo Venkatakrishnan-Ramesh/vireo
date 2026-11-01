@@ -159,7 +159,8 @@ int gguf_get_f32(const gguf_ctx *g, const char *key, float *out) {
 }
 const char *gguf_get_str(const gguf_ctx *g, const char *key, uint64_t *len) {
     const gguf_kv *k = gguf_find(g, key); if (!k || k->type != GGUF_STRING) return NULL;
-    if (len) *len = k->str.len; return k->str.ptr;
+    if (len) *len = k->str.len;
+    return k->str.ptr;
 }
 const gguf_tensor *gguf_tensor_by_name(const gguf_ctx *g, const char *name) {
     for (uint64_t i = 0; i < g->n_tensors; i++) if (key_eq(&g->tensors[i].name, name)) return &g->tensors[i];

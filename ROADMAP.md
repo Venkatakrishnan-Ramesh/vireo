@@ -23,6 +23,14 @@ oracle green.
 - `topk` by mean-key exists. Needed: better scorers (max-over-keys, SimHash,
   learned summaries), and a quality harness (perplexity vs. blocks loaded).
 
+## GGUF loader — real models (done, Q8_0)
+- `src/gguf.c` (mmap reader), `src/gguf_compute.c` (Q8_0/F16/F32 dequant +
+  quantized matmul), `src/gguf_run.c` (Qwen2 forward: NEOX RoPE, QKV bias, GQA,
+  SwiGLU, byte-level BPE tokenizer), KV streamed through the pager.
+- `make gguf-demo` runs Qwen2.5-0.5B-Instruct Q8_0 CPU-only; under a RAM budget
+  that forces eviction, `all` is byte-identical to the unbounded run.
+- Open next: more quant types (Q4_K, Q6_K), SIMD/threaded matmul, more arches.
+
 ## M4 — scale and product (open)
 - Async prefetch of next-token blocks.
 - AVX2/NEON dot products and dequant.
