@@ -1,0 +1,8 @@
+build_test
+vireo
+vireo-baseline
+*.o
+*.bin.tmp
+baseline/*.bin
+!baseline/tokenizer.bin
+docs/demo.gif

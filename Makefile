@@ -1,0 +1,27 @@
+CC      ?= cc
+CFLAGS  ?= -O2 -std=c11 -Wall -Wextra -Isrc
+LDLIBS  ?= -lm
+
+CORE := src/kvstore_dense.c src/kvstore_ooc.c \
+        src/select/select_all.c src/select/select_recent.c src/select/select_topk.c
+
+.PHONY: all test baseline clean
+all: test
+
+test: tests/test_kvstore_oracle.c $(CORE)
+	$(CC) $(CFLAGS) $^ $(LDLIBS) -o build_test
+	./build_test
+
+# llama2.c baseline (vendored, MIT). Downloads a tiny model via run.sh.
+baseline: baseline/run.c
+	$(CC) -O3 -march=native baseline/run.c -lm -o vireo-baseline
+
+clean:
+	rm -f build_test vireo-baseline
+
+vireo: src/main.c $(CORE)
+	$(CC) $(CFLAGS) $^ $(LDLIBS) -o vireo
+
+.PHONY: bench
+bench: vireo
+	./vireo bench 200000 topk
