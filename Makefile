@@ -25,3 +25,11 @@ vireo: src/main.c $(CORE)
 .PHONY: bench
 bench: vireo
 	./vireo bench 200000 topk
+
+# M1: llama2.c with its KV cache routed through vireo's KVStore
+vireo-run: src/run_vireo.c $(CORE)
+	$(CC) $(CFLAGS) $^ $(LDLIBS) -o vireo-run
+
+.PHONY: m1-test
+m1-test: vireo-baseline vireo-run
+	./tests/m1_check.sh

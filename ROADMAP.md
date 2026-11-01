@@ -7,10 +7,13 @@ oracle green.
 ## M0 — baseline (done)
 - Vendored `llama2.c` as a dense, correct reference model.
 
-## M1 — real model through the KVStore seam (open)
-- Route a llama2.c run's per-layer, per-head KV through `KVStore`.
-- Multi-head support in the store (currently single logical head).
-- New oracle: streamed model output == dense model output on a real prompt.
+## M1 — real model through the KVStore seam (done)
+- llama2.c's per-head KV is routed through `KVStore` (`src/run_vireo.c`), one
+  store-layer per `(layer, kv-head)`, GQA-aware, post-RoPE.
+- Proven: `make m1-test` — `ooc`/`all` under a RAM budget that forces eviction
+  generates **byte-identical** text to the unmodified baseline.
+- Open next: true multi-head batching, and the real-model quality harness for
+  the lossy strategies (feeds M3).
 
 ## M2 — out-of-core, exact (done, synthetic)
 - Block spill/page, LRU, leases, pinned sinks/window. Bit-exact vs dense.

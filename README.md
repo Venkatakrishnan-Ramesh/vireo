@@ -44,6 +44,24 @@ make bench     # streams a 200k-token context, prints the headline numbers
 
 Needs a C compiler and `make`. Nothing else.
 
+### Run a real model
+
+vireo routes the KV cache of Andrej Karpathy's `llama2.c` through its
+out-of-core store, so you can watch a real transformer generate with its KV
+streamed from disk:
+
+```bash
+make m1-test     # downloads a tiny model, proves ooc == baseline byte-for-byte
+                 # under a RAM budget that forces eviction
+
+# or drive it yourself (env vars pick the store + strategy):
+VIREO_STORE=ooc VIREO_STRATEGY=all VIREO_CAP_BLOCKS=140 VIREO_STATS=1 \
+  ./vireo-run baseline/stories15M.bin -z baseline/tokenizer.bin -t 0 -n 256 -i "Once upon a time"
+```
+
+With `VIREO_STRATEGY=all` the output is identical to stock llama2.c while the
+KV cache spills to disk; `topk` / `recent` trade exactness for less I/O.
+
 ## Benchmark (synthetic, kv_dim=128, 64-token blocks, 64-block budget)
 
 | context | strategy | resident RAM | dense RAM | ratio | cache hits |

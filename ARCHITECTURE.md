@@ -58,7 +58,7 @@ freely underneath it; do not cross it.
 | | milestone | state |
 |-|-----------|-------|
 | M0 | llama2.c dense baseline (oracle for a real model) | vendored |
-| M1 | route a real model's KV through `KVStore` (multi-head) | open |
+| M1 | route a real model's KV through `KVStore` | **done** (`make m1-test`) |
 | M2 | out-of-core, exact-match preserved | **done (synthetic)** |
 | M3 | sparse selection, quality measured vs recall | partial (`topk`) |
 | M4 | prefetch, SIMD, serving, 1M-token demo | open |
