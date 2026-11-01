@@ -188,7 +188,7 @@ void gguf_matmul(float *y, const float *x, const gguf_tensor *w, int n, int d) {
         const uint8_t *data = (const uint8_t *)w->data;
         #pragma omp parallel for schedule(static) if((long)n*(long)d > (1L<<20))
         for (int o = 0; o < d; o++) {
-            float tmp[8192];
+            float tmp[32768]; /* covers ffn up to ~32k (70B-class) */
             gguf_dequant_row(type, data + (size_t)o * row_bytes, tmp, n);
 #if defined(__AVX2__)
             y[o] = dot_f32(tmp, x, n);

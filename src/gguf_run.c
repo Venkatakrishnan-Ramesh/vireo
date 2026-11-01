@@ -154,10 +154,10 @@ static const gguf_tensor *T(gguf_ctx*g,const char*fmt,int l){char b[128];snprint
 
 static void rmsnorm(float*o,const float*x,const gguf_tensor*w,int n,float eps){
     float ss=0; for(int i=0;i<n;i++)ss+=x[i]*x[i]; float r=1.0f/sqrtf(ss/n+eps);
-    float wrow[8192]; gguf_dequant_row(w->ggml_type,w->data,wrow,n);
+    float wrow[16384]; gguf_dequant_row(w->ggml_type,w->data,wrow,n);
     for(int i=0;i<n;i++)o[i]=x[i]*r*wrow[i];
 }
-static void add_bias(float*y,const gguf_tensor*b,int n){ if(!b)return; float br[8192]; gguf_dequant_row(b->ggml_type,b->data,br,n); for(int i=0;i<n;i++)y[i]+=br[i]; }
+static void add_bias(float*y,const gguf_tensor*b,int n){ if(!b)return; float br[16384]; gguf_dequant_row(b->ggml_type,b->data,br,n); for(int i=0;i<n;i++)y[i]+=br[i]; }
 /* NEOX RoPE: rotate (j, j+hs/2) pairs, per head */
 static void rope_neox(float*vec,int n_heads,int hs,int pos,float base){
     int half=hs/2;
