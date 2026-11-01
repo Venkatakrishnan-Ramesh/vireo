@@ -106,7 +106,7 @@ static int merge_rank(const Merges *M, const char *a, int al, const char *b, int
 static int encode(const char *text, const Map *vmap, const Merges *M, int *out, int max_out) {
     /* byte-encode to a codepoint string (as UTF-8) */
     int tl = strlen(text);
-    char enc[8192]; int el = 0;
+    char *enc = malloc((size_t)tl*3 + 16); int el = 0;
     for (int i=0;i<tl;i++) el += cp_to_utf8(BYTE2CP[(unsigned char)text[i]], enc+el);
     /* split into words before each 'Ġ' (U+0120) */
     int nout = 0;
@@ -132,6 +132,7 @@ static int encode(const char *text, const Map *vmap, const Merges *M, int *out, 
         }
         for (int a=0;a<ns;a++){ int id=map_get(vmap,syms[a],sl[a]); if(id>=0 && nout<max_out) out[nout++]=id; }
     }
+    free(enc);
     return nout;
 }
 
@@ -165,7 +166,7 @@ static void rope_neox(float*vec,int n_heads,int hs,int pos,float base){
             float x0=p[j],x1=p[j+half]; p[j]=x0*c-x1*s; p[j+half]=x0*s+x1*c; } }
 }
 
-static float* forward(Model*m,int token,int pos){
+static float* forward(Model*m,int token,int pos,int want_logits){
     int d=m->dim,hs=m->head_size;
     gguf_dequant_row(m->tok_embd->ggml_type, (const char*)m->tok_embd->data + (size_t)token*(m->tok_embd->nbytes/m->vocab), m->x, d);
     for(int l=0;l<m->n_layers;l++){
@@ -190,6 +191,7 @@ static float* forward(Model*m,int token,int pos){
         gguf_matmul(m->xb,m->h1,ly->wd,m->ffn,d);
         for(int i=0;i<d;i++)m->x[i]+=m->xb[i];
     }
+    if(!want_logits) return NULL;              /* prefill: skip the 138MB LM head */
     rmsnorm(m->xb,m->x,m->out_norm,d,m->eps);
     gguf_matmul(m->logits,m->xb,m->lm_head,d,m->vocab);
     return m->logits;
@@ -198,11 +200,12 @@ static float* forward(Model*m,int token,int pos){
 static int argmax(const float*v,int n){int bi=0;float bv=v[0];for(int i=1;i<n;i++)if(v[i]>bv){bv=v[i];bi=i;}return bi;}
 
 int main(int argc,char**argv){
-    const char*path=NULL,*prompt="The meaning of life is";
+    const char*path=NULL,*prompt="The meaning of life is",*pfile=NULL;
     int steps=80;
     for(int i=1;i<argc;i++){
         if(!strcmp(argv[i],"-p")&&i+1<argc)prompt=argv[++i];
         else if(!strcmp(argv[i],"-n")&&i+1<argc)steps=atoi(argv[++i]);
+        else if(!strcmp(argv[i],"-f")&&i+1<argc)pfile=argv[++i];
         else if(argv[i][0]!='-')path=argv[i];
     }
     if(!path){fprintf(stderr,"usage: %s model.gguf [-p prompt] [-n steps]\n",argv[0]);return 2;}
@@ -211,6 +214,10 @@ int main(int argc,char**argv){
 #endif
     build_byte_maps();
     gguf_ctx*g=gguf_open(path); if(!g)return 1;
+    char *pbuf=NULL;
+    if(pfile){ FILE*fp=fopen(pfile,"rb"); if(!fp){fprintf(stderr,"cannot open %s\n",pfile);return 1;}
+        fseek(fp,0,SEEK_END); long sz=ftell(fp); fseek(fp,0,SEEK_SET);
+        pbuf=malloc(sz+1); if(fread(pbuf,1,sz,fp)!=(size_t)sz){} pbuf[sz]=0; fclose(fp); prompt=pbuf; }
     Model m={0}; m.g=g;
     uint64_t u;
     gguf_get_u64(g,"qwen2.block_count",&u); m.n_layers=u;
@@ -260,15 +267,15 @@ int main(int argc,char**argv){
     Map vmap=map_build(toks,nt); Merges M=merges_build(mgs,nm);
     uint64_t eos=151645; gguf_get_u64(g,"tokenizer.ggml.eos_token_id",&eos);
 
-    int ids[4096]; int np=encode(prompt,&vmap,&M,ids,4096);
+    int maxids=300000; int *ids=malloc(sizeof(int)*maxids); int np=encode(prompt,&vmap,&M,ids,maxids);
     fprintf(stderr,"[vireo-gguf] %s | layers=%d heads=%d/%d hs=%d vocab=%d | prompt=%d tokens | strategy=%s cap_blocks=%d\n",
             path,m.n_layers,m.n_heads,m.n_kv_heads,m.head_size,m.vocab,np,strat->name,capb);
 
-    printf("%s",prompt); fflush(stdout);
+    if(np<200) printf("%s",prompt); else printf("[prompt: %d tokens]\n",np); fflush(stdout);
     double t0=wall();
     int pos=0, tok=ids[0];
     for(int step=0; step<steps; step++){
-        float*lg=forward(&m,tok,pos); pos++;
+        float*lg=forward(&m,tok,pos, pos>=np-1); pos++;
         int next;
         if(pos<np) next=ids[pos];                 /* still feeding prompt */
         else next=argmax(lg,m.vocab);             /* greedy generate */
