@@ -33,3 +33,7 @@ vireo-run: src/run_vireo.c $(CORE)
 .PHONY: m1-test
 m1-test: vireo-baseline vireo-run
 	./tests/m1_check.sh
+
+.PHONY: demo
+demo: vireo
+	python3 scripts/make_demo.py

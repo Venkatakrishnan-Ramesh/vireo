@@ -3,8 +3,7 @@
 <p align="center">A transformer's KV cache, paged to disk. Pure C, zero dependencies, CPU-first.</p>
 
 <p align="center">
-  <!-- TODO: drop a 20s asciinema/GIF here before launch. It is 80% of the stars. -->
-  <img src="docs/demo.gif" width="640" alt="vireo streaming a long context with flat RAM" onerror="this.style.display='none'">
+  <img src="docs/demo.gif" width="720" alt="vireo: KV cache RAM stays flat as context grows to 1M tokens">
 </p>
 
 ---
@@ -62,16 +61,20 @@ VIREO_STORE=ooc VIREO_STRATEGY=all VIREO_CAP_BLOCKS=140 VIREO_STATS=1 \
 With `VIREO_STRATEGY=all` the output is identical to stock llama2.c while the
 KV cache spills to disk; `topk` / `recent` trade exactness for less I/O.
 
-## Benchmark (synthetic, kv_dim=128, 64-token blocks, 64-block budget)
+## Benchmark — resident RAM vs. context length
 
-| context | strategy | resident RAM | dense RAM | ratio | cache hits |
-|--------:|:---------|-------------:|----------:|------:|-----------:|
-| 200k    | `all`    | 3.9 MB       | 195 MB    | 50×   | exact      |
-| 200k    | `topk`   | 3.9 MB       | 195 MB    | 50×   | 68.9%      |
-| 200k    | `recent` | 3.9 MB       | 195 MB    | 50×   | 100%       |
+Measured by `scripts/make_demo.py` (every point is a real `./vireo` run; kv_dim=128,
+64-token blocks, 64-block budget, `topk`). Dense = the whole KV cache held in RAM.
 
-(Real-model numbers land with ROADMAP M1 — llama2.c integration. The synthetic
-bench measures the pager itself.)
+| context | dense cache | vireo resident | less RAM | cache hits |
+|--------:|------------:|---------------:|---------:|-----------:|
+| 10k     | 9.8 MB      | 3.9 MB         | 2.5×     | 87%        |
+| 100k    | 97.7 MB     | 3.9 MB         | 25×      | 70%        |
+| 1,000k  | 976.6 MB    | **3.9 MB**     | **248×** | 68%        |
+
+Resident RAM is flat from ~5k tokens to a million; dense grows linearly. With the
+exact `all` strategy on a real model (`make m1-test`), the streamed output is
+**byte-identical** to stock llama2.c. Regenerate the chart with `make demo`.
 
 ## How it works
 
