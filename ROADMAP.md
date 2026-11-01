@@ -34,6 +34,16 @@ oracle green.
   generic dequant-then-dot path is ~2x slower than the fused Q8_0 path), more
   architectures (Llama/Mistral tensor names), NEON for ARM.
 
+## MoE expert streaming (done)
+- `src/expert_store.{h,c}`: the KVStore twin for expert weights — lease-LRU
+  pager, `pread` from the GGUF, bounded by `VIREO_EXPERT_CAP_MB`. Unit-tested
+  (`make expert-test`).
+- MoE forward (router + top-k) in gguf_run.c, generic over architecture.
+- Verified: OLMoE-1B-7B (64 experts/top-8) coherent; experts capped at 256 MB
+  (vs 2.7 GB) stream from disk with identical output (`make moe-demo`).
+- Open next: Qwen3-30B-A3B (the 30B-on-a-laptop headline), shared-expert
+  models (Qwen2-MoE/DeepSeek), prefetch of likely-next experts.
+
 ## M4 — scale and product (open)
 - Async prefetch of next-token blocks.
 - AVX2 Q8_0 matmul done; NEON (ARM) and AVX2 for the KV attention dot still open.

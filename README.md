@@ -102,6 +102,26 @@ Resident RAM is flat from ~5k tokens to a million; dense grows linearly. With th
 exact `all` strategy on a real model (`make m1-test`), the streamed output is
 **byte-identical** to stock llama2.c. Regenerate the chart with `make demo`.
 
+## Run a Mixture-of-Experts model bigger than RAM
+
+An MoE model has many experts but fires only a few per token. vireo streams the
+**expert weights** from disk through the same lease-LRU pager (`ExpertStore`),
+keeping only the active experts resident — so a model far larger than RAM runs
+with a small fraction of it in memory.
+
+```bash
+make moe-demo    # OLMoE-1B-7B (64 experts, top-8): runs with experts streamed
+```
+
+```
+$ VIREO_EXPERT_CAP_MB=256 ./vireo-gguf models/olmoe-1b-7b-q4_k_m.gguf -p "The capital of France is"
+The capital of France is Paris. The currency of France is Euro. ...
+[vireo-gguf] experts: 70/1024 resident (256 MB) ...   # vs 2.7 GB full — same output
+```
+
+`VIREO_EXPERT_CAP_MB` bounds resident expert RAM; the rest stream from disk.
+This is how a 30B-class MoE fits on a laptop.
+
 ## How it works
 
 See **[ARCHITECTURE.md](ARCHITECTURE.md)**. The whole project is one idea — an
