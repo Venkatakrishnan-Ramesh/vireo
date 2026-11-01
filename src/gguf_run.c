@@ -11,6 +11,7 @@
 #include "gguf.h"
 #include "gguf_compute.h"
 #include "kvstore.h"
+#include "expert_store.h"
 #include "select/select.h"
 #ifdef _OPENMP
 #include <omp.h>
@@ -139,6 +140,8 @@ static int encode(const char *text, const Map *vmap, const Merges *M, int *out, 
 /* ----------------------------- model ------------------------------------ */
 typedef struct {
     const gguf_tensor *attn_norm,*wq,*bq,*wk,*bk,*wv,*bv,*wo,*ffn_norm,*wg,*wu,*wd;
+    const gguf_tensor *q_norm,*k_norm;                 /* optional QK-norm (OLMoE/Qwen3) */
+    const gguf_tensor *router,*gate_exps,*up_exps,*down_exps; /* MoE */
 } Layer;
 typedef struct {
     gguf_ctx *g;
@@ -148,6 +151,9 @@ typedef struct {
     Layer *L;
     KVStore *kv;
     float *x,*xb,*h1,*h2,*q,*k,*v,*att_out,*logits;
+    int is_moe,n_experts,n_used,ffn_exp; uint32_t exp_type;
+    ExpertStore *es;
+    float *rlog,*gbuf,*ubuf,*dbuf,*moe_acc;
 } Model;
 
 static const gguf_tensor *T(gguf_ctx*g,const char*fmt,int l){char b[128];snprintf(b,sizeof(b),fmt,l);const gguf_tensor*t=gguf_tensor_by_name(g,b);if(!t){fprintf(stderr,"missing tensor %s\n",b);exit(1);}return t;}
@@ -166,6 +172,42 @@ static void rope_neox(float*vec,int n_heads,int hs,int pos,float base){
             float x0=p[j],x1=p[j+half]; p[j]=x0*c-x1*s; p[j+half]=x0*s+x1*c; } }
 }
 
+
+/* softmax over n in place */
+static void softmax_n(float*v,int n){ float m=v[0]; for(int i=1;i<n;i++)if(v[i]>m)m=v[i];
+    float s=0; for(int i=0;i<n;i++){v[i]=expf(v[i]-m); s+=v[i];} for(int i=0;i<n;i++)v[i]/=s; }
+
+/* run the MoE FFN for the current token: router -> top-k experts via ExpertStore */
+static void moe_ffn(Model*m,int layer,float*hb){
+    Layer*ly=&m->L[layer]; int d=m->dim, fe=m->ffn_exp, ne=m->n_experts, k=m->n_used;
+    gguf_matmul(m->rlog,hb,ly->router,d,ne);
+    softmax_n(m->rlog,ne);
+    /* pick top-k by probability */
+    int idxs[64]; float wts[64]; int kk = k<64?k:64;
+    for(int t=0;t<kk;t++){ int best=-1; float bv=-1; for(int e=0;e<ne;e++){ int used=0; for(int j=0;j<t;j++) if(idxs[j]==e){used=1;break;} if(!used && m->rlog[e]>bv){bv=m->rlog[e];best=e;} } idxs[t]=best; wts[t]=bv; }
+    for(int i=0;i<d;i++) m->moe_acc[i]=0;
+    uint64_t base_g=(uint64_t)((const uint8_t*)ly->gate_exps->data-(const uint8_t*)m->g->map);
+    uint64_t base_u=(uint64_t)((const uint8_t*)ly->up_exps->data-(const uint8_t*)m->g->map);
+    uint64_t base_d=(uint64_t)((const uint8_t*)ly->down_exps->data-(const uint8_t*)m->g->map);
+    uint64_t gslice=ly->gate_exps->nbytes/ne, uslice=ly->up_exps->nbytes/ne, dslice=ly->down_exps->nbytes/ne;
+    for(int t=0;t<kk;t++){
+        int e=idxs[t]; float w=wts[t];   /* OLMoE: raw softmax prob, no renorm */
+        ExpertView v;
+        if(expert_store_lookup(m->es,layer,e,&v)) continue;
+        gguf_tensor tg={0}; tg.data=v.gate; tg.ggml_type=ly->gate_exps->ggml_type;
+        gguf_tensor tu={0}; tu.data=v.up;   tu.ggml_type=ly->up_exps->ggml_type;
+        gguf_tensor td={0}; td.data=v.down; td.ggml_type=ly->down_exps->ggml_type;
+        gguf_matmul(m->gbuf,hb,&tg,d,fe);
+        gguf_matmul(m->ubuf,hb,&tu,d,fe);
+        for(int i=0;i<fe;i++){ float g=m->gbuf[i]; m->gbuf[i]=(g/(1.0f+expf(-g)))*m->ubuf[i]; }
+        gguf_matmul(m->dbuf,m->gbuf,&td,fe,d);
+        for(int i=0;i<d;i++) m->moe_acc[i]+=w*m->dbuf[i];
+        expert_store_release(m->es,&v);
+    }
+    (void)base_g;(void)base_u;(void)base_d;(void)gslice;(void)uslice;(void)dslice;
+    for(int i=0;i<d;i++) m->x[i]+=m->moe_acc[i];
+}
+
 static float* forward(Model*m,int token,int pos,int want_logits){
     int d=m->dim,hs=m->head_size;
     gguf_dequant_row(m->tok_embd->ggml_type, (const char*)m->tok_embd->data + (size_t)token*(m->tok_embd->nbytes/m->vocab), m->x, d);
@@ -175,6 +217,8 @@ static float* forward(Model*m,int token,int pos,int want_logits){
         gguf_matmul(m->q,m->xb,ly->wq,d,m->n_heads*hs); add_bias(m->q,ly->bq,m->n_heads*hs);
         gguf_matmul(m->k,m->xb,ly->wk,d,m->n_kv_heads*hs); add_bias(m->k,ly->bk,m->n_kv_heads*hs);
         gguf_matmul(m->v,m->xb,ly->wv,d,m->n_kv_heads*hs); add_bias(m->v,ly->bv,m->n_kv_heads*hs);
+        if(ly->q_norm) rmsnorm(m->q,m->q,ly->q_norm,m->n_heads*hs,m->eps);
+        if(ly->k_norm) rmsnorm(m->k,m->k,ly->k_norm,m->n_kv_heads*hs,m->eps);
         rope_neox(m->q,m->n_heads,hs,pos,m->rope_base);
         rope_neox(m->k,m->n_kv_heads,hs,pos,m->rope_base);
         for(int kh=0;kh<m->n_kv_heads;kh++)
@@ -185,11 +229,14 @@ static float* forward(Model*m,int token,int pos,int want_logits){
         gguf_matmul(m->xb,m->att_out,ly->wo,m->n_heads*hs,d);
         for(int i=0;i<d;i++)m->x[i]+=m->xb[i];
         rmsnorm(m->xb,m->x,ly->ffn_norm,d,m->eps);
-        gguf_matmul(m->h1,m->xb,ly->wg,d,m->ffn);
-        gguf_matmul(m->h2,m->xb,ly->wu,d,m->ffn);
-        for(int i=0;i<m->ffn;i++){ float g=m->h1[i]; m->h1[i]=(g/(1.0f+expf(-g)))*m->h2[i]; }
-        gguf_matmul(m->xb,m->h1,ly->wd,m->ffn,d);
-        for(int i=0;i<d;i++)m->x[i]+=m->xb[i];
+        if(m->is_moe){ moe_ffn(m,l,m->xb); }
+        else {
+            gguf_matmul(m->h1,m->xb,ly->wg,d,m->ffn);
+            gguf_matmul(m->h2,m->xb,ly->wu,d,m->ffn);
+            for(int i=0;i<m->ffn;i++){ float g=m->h1[i]; m->h1[i]=(g/(1.0f+expf(-g)))*m->h2[i]; }
+            gguf_matmul(m->xb,m->h1,ly->wd,m->ffn,d);
+            for(int i=0;i<d;i++)m->x[i]+=m->xb[i];
+        }
     }
     if(!want_logits) return NULL;              /* prefill: skip the 138MB LM head */
     rmsnorm(m->xb,m->x,m->out_norm,d,m->eps);
@@ -219,15 +266,21 @@ int main(int argc,char**argv){
         fseek(fp,0,SEEK_END); long sz=ftell(fp); fseek(fp,0,SEEK_SET);
         pbuf=malloc(sz+1); if(fread(pbuf,1,sz,fp)!=(size_t)sz){} pbuf[sz]=0; fclose(fp); prompt=pbuf; }
     Model m={0}; m.g=g;
-    uint64_t u;
-    gguf_get_u64(g,"qwen2.block_count",&u); m.n_layers=u;
-    gguf_get_u64(g,"qwen2.embedding_length",&u); m.dim=u;
-    gguf_get_u64(g,"qwen2.feed_forward_length",&u); m.ffn=u;
-    gguf_get_u64(g,"qwen2.attention.head_count",&u); m.n_heads=u;
-    gguf_get_u64(g,"qwen2.attention.head_count_kv",&u); m.n_kv_heads=u;
-    gguf_get_f32(g,"qwen2.attention.layer_norm_rms_epsilon",&m.eps);
-    gguf_get_f32(g,"qwen2.rope.freq_base",&m.rope_base);
+    uint64_t u; char arch[64]="qwen2"; { uint64_t al; const char*a=gguf_get_str(g,"general.architecture",&al); if(a){ int n=al<63?al:63; memcpy(arch,a,n); arch[n]=0; } }
+    char kb[128];
+    #define GK(suf) (snprintf(kb,sizeof(kb),"%s." suf,arch),kb)
+    gguf_get_u64(g,GK("block_count"),&u); m.n_layers=u;
+    gguf_get_u64(g,GK("embedding_length"),&u); m.dim=u;
+    gguf_get_u64(g,GK("feed_forward_length"),&u); m.ffn=u;
+    gguf_get_u64(g,GK("attention.head_count"),&u); m.n_heads=u;
+    gguf_get_u64(g,GK("attention.head_count_kv"),&u); m.n_kv_heads=u;
+    gguf_get_f32(g,GK("attention.layer_norm_rms_epsilon"),&m.eps);
+    m.rope_base=10000.0f; gguf_get_f32(g,GK("rope.freq_base"),&m.rope_base);
     m.head_size=m.dim/m.n_heads;
+    /* MoE fields (present only for MoE architectures) */
+    if(gguf_get_u64(g,GK("expert_count"),&u)==0 && u>0){ m.is_moe=1; m.n_experts=u;
+        m.n_used=8; if(gguf_get_u64(g,GK("expert_used_count"),&u)==0) m.n_used=u;
+        m.ffn_exp=m.ffn; if(gguf_get_u64(g,GK("expert_feed_forward_length"),&u)==0) m.ffn_exp=u; }
     m.tok_embd=gguf_tensor_by_name(g,"token_embd.weight");
     m.vocab=m.tok_embd->dims[1];
     m.out_norm=gguf_tensor_by_name(g,"output_norm.weight");
@@ -243,7 +296,30 @@ int main(int argc,char**argv){
         ly->wv=T(g,"blk.%d.attn_v.weight",l); snprintf(nb,64,"blk.%d.attn_v.bias",l); ly->bv=gguf_tensor_by_name(g,nb);
         ly->wo=T(g,"blk.%d.attn_output.weight",l);
         ly->ffn_norm=T(g,"blk.%d.ffn_norm.weight",l);
-        ly->wg=T(g,"blk.%d.ffn_gate.weight",l); ly->wu=T(g,"blk.%d.ffn_up.weight",l); ly->wd=T(g,"blk.%d.ffn_down.weight",l);
+        snprintf(nb,64,"blk.%d.attn_q_norm.weight",l); ly->q_norm=gguf_tensor_by_name(g,nb);
+        snprintf(nb,64,"blk.%d.attn_k_norm.weight",l); ly->k_norm=gguf_tensor_by_name(g,nb);
+        if(m.is_moe){
+            ly->router   =T(g,"blk.%d.ffn_gate_inp.weight",l);
+            ly->gate_exps=T(g,"blk.%d.ffn_gate_exps.weight",l);
+            ly->up_exps  =T(g,"blk.%d.ffn_up_exps.weight",l);
+            ly->down_exps=T(g,"blk.%d.ffn_down_exps.weight",l);
+        } else {
+            ly->wg=T(g,"blk.%d.ffn_gate.weight",l); ly->wu=T(g,"blk.%d.ffn_up.weight",l); ly->wd=T(g,"blk.%d.ffn_down.weight",l);
+        }
+    }
+    /* ExpertStore: stream MoE expert weights from disk */
+    if(m.is_moe){
+        m.exp_type=m.L[0].gate_exps->ggml_type;
+        uint64_t ecap_mb = getenv("VIREO_EXPERT_CAP_MB")?strtoull(getenv("VIREO_EXPERT_CAP_MB"),0,10):0;
+        m.es=expert_store_create(g->fd, ecap_mb*1048576ULL, m.n_layers, m.n_experts);
+        for(int l=0;l<m.n_layers;l++){ Layer*ly=&m.L[l];
+            uint64_t bg=(uint64_t)((const uint8_t*)ly->gate_exps->data-(const uint8_t*)g->map);
+            uint64_t bu=(uint64_t)((const uint8_t*)ly->up_exps->data-(const uint8_t*)g->map);
+            uint64_t bd=(uint64_t)((const uint8_t*)ly->down_exps->data-(const uint8_t*)g->map);
+            uint32_t gs=ly->gate_exps->nbytes/m.n_experts, us=ly->up_exps->nbytes/m.n_experts, ds=ly->down_exps->nbytes/m.n_experts;
+            for(int e=0;e<m.n_experts;e++){ ExpertSlices L2={ bg+(uint64_t)e*gs, bu+(uint64_t)e*us, bd+(uint64_t)e*ds, gs,us,ds };
+                expert_store_register(m.es,l,e,&L2); }
+        }
     }
     /* vireo KV store */
     int capb = getenv("VIREO_CAP_BLOCKS")?atoi(getenv("VIREO_CAP_BLOCKS")):0;
@@ -260,6 +336,8 @@ int main(int argc,char**argv){
     m.x=malloc(m.dim*4);m.xb=malloc(m.dim*4);m.h1=malloc(m.ffn*4);m.h2=malloc(m.ffn*4);
     m.q=malloc(m.n_heads*m.head_size*4);m.k=malloc(m.n_kv_heads*m.head_size*4);m.v=malloc(m.n_kv_heads*m.head_size*4);
     m.att_out=malloc(m.n_heads*m.head_size*4);m.logits=malloc(m.vocab*4);
+    if(m.is_moe){ m.rlog=malloc(m.n_experts*4); m.gbuf=malloc(m.ffn_exp*4); m.ubuf=malloc(m.ffn_exp*4);
+        m.dbuf=malloc(m.dim*4); m.moe_acc=malloc(m.dim*4); }
 
     /* tokenizer */
     uint64_t nt,nm; const gguf_kv*tk=gguf_find(g,"tokenizer.ggml.tokens"); const gguf_kv*mk=gguf_find(g,"tokenizer.ggml.merges");
@@ -268,8 +346,10 @@ int main(int argc,char**argv){
     uint64_t eos=151645; gguf_get_u64(g,"tokenizer.ggml.eos_token_id",&eos);
 
     int maxids=300000; int *ids=malloc(sizeof(int)*maxids); int np=encode(prompt,&vmap,&M,ids,maxids);
-    fprintf(stderr,"[vireo-gguf] %s | layers=%d heads=%d/%d hs=%d vocab=%d | prompt=%d tokens | strategy=%s cap_blocks=%d\n",
-            path,m.n_layers,m.n_heads,m.n_kv_heads,m.head_size,m.vocab,np,strat->name,capb);
+    if(m.is_moe) fprintf(stderr,"[vireo-gguf] %s | arch=%s MoE %d experts, top-%d, ffn_exp=%d | layers=%d heads=%d/%d | prompt=%d tokens\n",
+            path,arch,m.n_experts,m.n_used,m.ffn_exp,m.n_layers,m.n_heads,m.n_kv_heads,np);
+    else fprintf(stderr,"[vireo-gguf] %s | arch=%s layers=%d heads=%d/%d hs=%d vocab=%d | prompt=%d tokens | strategy=%s cap_blocks=%d\n",
+            path,arch,m.n_layers,m.n_heads,m.n_kv_heads,m.head_size,m.vocab,np,strat->name,capb);
 
     if(np<200) printf("%s",prompt); else printf("[prompt: %d tokens]\n",np); fflush(stdout);
     double t0=wall();
@@ -290,6 +370,11 @@ int main(int argc,char**argv){
     }
     double dt=wall()-t0;
     printf("\n");
+    if(m.is_moe){ ExpertStats es; expert_store_stats(m.es,&es);
+        fprintf(stderr,"[vireo-gguf] experts: %llu/%d resident (%.0f MB%s) | lookups=%llu hits=%.0f%% read=%.0fMB\n",
+            (unsigned long long)es.experts_resident, m.n_experts*m.n_layers, es.resident_bytes/1048576.0,
+            es.capacity_bytes?"":" uncapped",(unsigned long long)es.requests,
+            es.requests?100.0*es.hits/es.requests:0, es.bytes_read/1048576.0); }
     KVStats st; kv_stats(m.kv,&st);
     fprintf(stderr,"[vireo-gguf] %d steps in %.1fs (%.1f tok/s) | KV hits=%.0f%% read=%.0fMB spilled=%.0fMB resident=%.1fMB\n",
             steps,dt,steps/dt, st.requests?100.0*st.hits/st.requests:0, st.bytes_read/1048576.0, st.bytes_spilled/1048576.0, st.resident_bytes/1048576.0);

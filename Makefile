@@ -42,7 +42,7 @@ gguf-dump: tools/gguf_dump.c src/gguf.c
 	$(CC) $(CFLAGS) $^ $(LDLIBS) -o gguf-dump
 
 # vireo-gguf: run a real GGUF model with KV streamed through vireo
-GGUF_SRC := src/gguf.c src/gguf_compute.c
+GGUF_SRC := src/gguf.c src/gguf_compute.c src/expert_store.c
 vireo-gguf: src/gguf_run.c $(GGUF_SRC) $(CORE)
 	$(CC) $(CFLAGS) $^ $(LDLIBS) -o vireo-gguf
 
@@ -52,3 +52,7 @@ gguf-demo: vireo-gguf
 
 expert-test: tests/test_expert_store.c src/expert_store.c
 	$(CC) $(CFLAGS) $^ $(LDLIBS) -o build_expert_test && ./build_expert_test
+
+.PHONY: moe-demo
+moe-demo: vireo-gguf
+	./scripts/moe_demo.sh
