@@ -151,7 +151,7 @@ typedef struct {
     Layer *L;
     KVStore *kv;
     float *x,*xb,*h1,*h2,*q,*k,*v,*att_out,*logits;
-    int is_moe,n_experts,n_used,ffn_exp; uint32_t exp_type;
+    int is_moe,n_experts,n_used,ffn_exp,topk_renorm; uint32_t exp_type;
     ExpertStore *es;
     float *rlog,*gbuf,*ubuf,*dbuf,*moe_acc;
 } Model;
@@ -173,6 +173,10 @@ static void rope_neox(float*vec,int n_heads,int hs,int pos,float base){
 }
 
 
+/* per-head RMSNorm (Qwen3: q_norm/k_norm sized head_size, applied per head) */
+static void rmsnorm_heads(float*v,int nh,int hs,const gguf_tensor*w,float eps){
+    for(int h=0;h<nh;h++) rmsnorm(v+h*hs, v+h*hs, w, hs, eps);
+}
 /* softmax over n in place */
 static void softmax_n(float*v,int n){ float m=v[0]; for(int i=1;i<n;i++)if(v[i]>m)m=v[i];
     float s=0; for(int i=0;i<n;i++){v[i]=expf(v[i]-m); s+=v[i];} for(int i=0;i<n;i++)v[i]/=s; }
@@ -185,6 +189,7 @@ static void moe_ffn(Model*m,int layer,float*hb){
     /* pick top-k by probability */
     int idxs[64]; float wts[64]; int kk = k<64?k:64;
     for(int t=0;t<kk;t++){ int best=-1; float bv=-1; for(int e=0;e<ne;e++){ int used=0; for(int j=0;j<t;j++) if(idxs[j]==e){used=1;break;} if(!used && m->rlog[e]>bv){bv=m->rlog[e];best=e;} } idxs[t]=best; wts[t]=bv; }
+    if(m->topk_renorm){ float ws=0; for(int t=0;t<kk;t++) ws+=wts[t]; if(ws>0) for(int t=0;t<kk;t++) wts[t]/=ws; }
     for(int i=0;i<d;i++) m->moe_acc[i]=0;
     uint64_t base_g=(uint64_t)((const uint8_t*)ly->gate_exps->data-(const uint8_t*)m->g->map);
     uint64_t base_u=(uint64_t)((const uint8_t*)ly->up_exps->data-(const uint8_t*)m->g->map);
@@ -217,8 +222,10 @@ static float* forward(Model*m,int token,int pos,int want_logits){
         gguf_matmul(m->q,m->xb,ly->wq,d,m->n_heads*hs); add_bias(m->q,ly->bq,m->n_heads*hs);
         gguf_matmul(m->k,m->xb,ly->wk,d,m->n_kv_heads*hs); add_bias(m->k,ly->bk,m->n_kv_heads*hs);
         gguf_matmul(m->v,m->xb,ly->wv,d,m->n_kv_heads*hs); add_bias(m->v,ly->bv,m->n_kv_heads*hs);
-        if(ly->q_norm) rmsnorm(m->q,m->q,ly->q_norm,m->n_heads*hs,m->eps);
-        if(ly->k_norm) rmsnorm(m->k,m->k,ly->k_norm,m->n_kv_heads*hs,m->eps);
+        if(ly->q_norm){ if((int)ly->q_norm->dims[0]==hs) rmsnorm_heads(m->q,m->n_heads,hs,ly->q_norm,m->eps);
+                        else rmsnorm(m->q,m->q,ly->q_norm,m->n_heads*hs,m->eps); }
+        if(ly->k_norm){ if((int)ly->k_norm->dims[0]==hs) rmsnorm_heads(m->k,m->n_kv_heads,hs,ly->k_norm,m->eps);
+                        else rmsnorm(m->k,m->k,ly->k_norm,m->n_kv_heads*hs,m->eps); }
         rope_neox(m->q,m->n_heads,hs,pos,m->rope_base);
         rope_neox(m->k,m->n_kv_heads,hs,pos,m->rope_base);
         for(int kh=0;kh<m->n_kv_heads;kh++)
@@ -280,7 +287,9 @@ int main(int argc,char**argv){
     /* MoE fields (present only for MoE architectures) */
     if(gguf_get_u64(g,GK("expert_count"),&u)==0 && u>0){ m.is_moe=1; m.n_experts=u;
         m.n_used=8; if(gguf_get_u64(g,GK("expert_used_count"),&u)==0) m.n_used=u;
-        m.ffn_exp=m.ffn; if(gguf_get_u64(g,GK("expert_feed_forward_length"),&u)==0) m.ffn_exp=u; }
+        m.ffn_exp=m.ffn; if(gguf_get_u64(g,GK("expert_feed_forward_length"),&u)==0) m.ffn_exp=u;
+        m.topk_renorm = strcmp(arch,"olmoe")!=0;   /* OLMoE: raw probs; Qwen3/Mixtral: renorm */
+        if(gguf_get_u64(g,GK("expert_weights_norm"),&u)==0) m.topk_renorm=(int)u; }
     m.tok_embd=gguf_tensor_by_name(g,"token_embd.weight");
     m.vocab=m.tok_embd->dims[1];
     m.out_norm=gguf_tensor_by_name(g,"output_norm.weight");
