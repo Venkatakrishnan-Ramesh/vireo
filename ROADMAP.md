@@ -41,7 +41,9 @@ oracle green.
 - MoE forward (router + top-k) in gguf_run.c, generic over architecture.
 - Verified: OLMoE-1B-7B (64 experts/top-8) coherent; experts capped at 256 MB
   (vs 2.7 GB) stream from disk with identical output (`make moe-demo`).
-- Open next: Qwen3-30B-A3B (the 30B-on-a-laptop headline), shared-expert
+- **Qwen3-30B-A3B runs** (qwen3moe, 128 experts/top-8, 48 layers): coherent
+  on a 14 GB laptop with experts capped at 4 GB, rest streamed from disk.
+- Open next: shared-expert
   models (Qwen2-MoE/DeepSeek), prefetch of likely-next experts.
 
 ## M4 — scale and product (open)

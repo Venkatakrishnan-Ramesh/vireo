@@ -113,6 +113,15 @@ with a small fraction of it in memory.
 make moe-demo    # OLMoE-1B-7B (64 experts, top-8): runs with experts streamed
 ```
 
+**Qwen3-30B-A3B on a 14 GB laptop** — a 30-billion-parameter model (18 GB on
+disk) runs with experts capped at 4 GB of RAM, the rest streamed from disk:
+
+```
+$ VIREO_EXPERT_CAP_MB=4096 ./vireo-gguf models/qwen3-30b-a3b-q4_k_m.gguf -p "The capital of France is"
+The capital of France is Paris. The capital of Italy is Rome. The capital of Spain is Madrid. ...
+[vireo-gguf] experts: 1500/6144 resident (4.0 GB)  # vs ~15 GB full; rest streamed from disk
+```
+
 ```
 $ VIREO_EXPERT_CAP_MB=256 ./vireo-gguf models/olmoe-1b-7b-q4_k_m.gguf -p "The capital of France is"
 The capital of France is Paris. The currency of France is Euro. ...

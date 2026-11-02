@@ -284,6 +284,7 @@ int main(int argc,char**argv){
     gguf_get_f32(g,GK("attention.layer_norm_rms_epsilon"),&m.eps);
     m.rope_base=10000.0f; gguf_get_f32(g,GK("rope.freq_base"),&m.rope_base);
     m.head_size=m.dim/m.n_heads;
+    if(gguf_get_u64(g,GK("attention.key_length"),&u)==0) m.head_size=(int)u;  /* Qwen3: explicit head_dim */
     /* MoE fields (present only for MoE architectures) */
     if(gguf_get_u64(g,GK("expert_count"),&u)==0 && u>0){ m.is_moe=1; m.n_experts=u;
         m.n_used=8; if(gguf_get_u64(g,GK("expert_used_count"),&u)==0) m.n_used=u;
